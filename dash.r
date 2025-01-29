@@ -112,7 +112,8 @@ ui <- dashboardPage(
                                   choices = c("Merge Tables" = "merge",
                                             "Append Tables" = "append",
                                             "Summarize Data" = "summarize",
-                                            "Inspect Data Types" = "inspect")),
+                                            "Inspect Data Types" = "inspect",
+                                            "Remove Columns" = "remove")),
                         # Merge Panel
                         conditionalPanel(
                             condition = "input.manipulation_type == 'merge'",
@@ -165,6 +166,15 @@ ui <- dashboardPage(
                             condition = "input.manipulation_type == 'inspect'",
                             selectInput("inspect_table", "Select Table", choices = NULL),
                             DTOutput("column_types_table")
+                        ),
+                        # Add the Remove Columns Panel after the other panels
+                        conditionalPanel(
+                            condition = "input.manipulation_type == 'remove'",
+                            selectInput("remove_table", "Select Table", choices = NULL),
+                            selectizeInput("columns_to_remove", "Select Columns to Remove",
+                                         choices = NULL, multiple = TRUE),
+                            actionButton("do_remove", "Remove Columns",
+                                       class = "btn-warning")
                         )
                     ),
                     box(width = 6,
@@ -208,12 +218,9 @@ server <- function(input, output, session) {
                 table1 = datasets()[[input$table1]],
                 table2 = datasets()[[input$table2]]
             )
-        } else if (input$manipulation_type == "summarize") {
-            req(input$sum_table)
-            datasets()[[input$sum_table]]
-        } else if (input$manipulation_type == "inspect") {
-            req(input$inspect_table)
-            datasets()[[input$inspect_table]]
+        } else if (input$manipulation_type %in% c("summarize", "inspect", "remove")) {
+            req(input$sum_table %||% input$inspect_table %||% input$remove_table)
+            datasets()[[input$sum_table %||% input$inspect_table %||% input$remove_table]]
         }
     })
     
@@ -290,6 +297,7 @@ server <- function(input, output, session) {
         updateSelectInput(session, "sum_table", choices = choices)
         updateSelectInput(session, "viz_table", choices = choices)
         updateSelectInput(session, "inspect_table", choices = choices)
+        updateSelectInput(session, "remove_table", choices = choices)
     }
 
     # Update merge columns when tables are selected
@@ -732,6 +740,59 @@ server <- function(input, output, session) {
         if (!is.null(db_conn())) {
             dbDisconnect(db_conn())
         }
+    })
+
+    # Update column choices when remove table is selected
+    observeEvent(input$remove_table, {
+        req(input$remove_table)
+        data <- datasets()[[input$remove_table]]
+        if (!is.null(data)) {
+            updateSelectizeInput(session, "columns_to_remove", 
+                               choices = names(data))
+        }
+    })
+
+    # Handle remove columns operation
+    observeEvent(input$do_remove, {
+        req(input$remove_table, input$columns_to_remove)
+        
+        tryCatch({
+            data <- datasets()[[input$remove_table]]
+            
+            # Ensure we're not removing all columns
+            if (length(input$columns_to_remove) >= ncol(data)) {
+                showNotification("Cannot remove all columns from the table", 
+                               type = "error")
+                return()
+            }
+            
+            # Remove selected columns
+            data_subset <- data[, !(names(data) %in% input$columns_to_remove), with = FALSE]
+            
+            # Create new name for modified dataset
+            new_name <- paste0(input$remove_table, "_modified")
+            current_data <- datasets()
+            if (new_name %in% names(current_data)) {
+                counter <- 1
+                while(paste0(new_name, "_", counter) %in% names(current_data)) {
+                    counter <- counter + 1
+                }
+                new_name <- paste0(new_name, "_", counter)
+            }
+            
+            # Update datasets
+            current_data[[new_name]] <- data_subset
+            datasets(current_data)
+            updateAllSelectInputs(session)
+            
+            # Show success message
+            showNotification(paste("Columns removed. New dataset saved as:", new_name), 
+                           type = "message")
+            
+        }, error = function(e) {
+            showNotification(paste("Error removing columns:", e$message), 
+                           type = "error")
+        })
     })
 }
 
