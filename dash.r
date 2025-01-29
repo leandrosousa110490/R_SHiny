@@ -524,49 +524,99 @@ server <- function(input, output, session) {
         folder <- choose.dir(caption = "Select folder containing data files")
         if (!is.null(folder)) {
             withProgress(message = 'Loading folder contents', value = 0, {
-                files <- list.files(folder, pattern = "\\.csv$|\\.xlsx$|\\.xls$", 
+                files <- list.files(folder, pattern = "\\.xlsx$|\\.xls$", 
                                   full.names = TRUE)
                 
-                all_data <- list()
-                for(i in seq_along(files)) {
-                    incProgress(i/length(files), 
-                              detail = paste("Processing", basename(files[i])))
-                    
-                    ext <- tolower(tools::file_ext(files[i]))
-                    
-                    if(ext == "csv") {
-                        data <- optimized_read_file(files[i])
-                    } else if(ext %in% c("xls", "xlsx")) {
-                        data <- safe_read_excel(files[i])
-                    }
-                    
-                    if(!is.null(data) && nrow(data) > 0) {
-                        all_data[[length(all_data) + 1]] <- data
-                    }
-                    gc()
-                }
-                
-                if(length(all_data) > 0) {
-                    combined_data <- rbindlist(all_data, fill = TRUE, use.names = TRUE)
-                    combined_data <- compress_dataset(combined_data)
-                    
-                    current_data <- datasets()
-                    new_name <- "combined_data"
-                    if(new_name %in% names(current_data)) {
-                        counter <- 1
-                        while(paste0(new_name, "_", counter) %in% names(current_data)) {
-                            counter <- counter + 1
-                        }
-                        new_name <- paste0(new_name, "_", counter)
-                    }
-                    current_data[[new_name]] <- combined_data
-                    datasets(current_data)
-                    updateAllSelectInputs(session)
-                    
-                    showNotification(paste("Successfully loaded", length(files), "files"), type = "message")
+                # Check if we have only Excel files
+                if(length(files) > 0 && all(tolower(tools::file_ext(files)) %in% c("xls", "xlsx"))) {
+                    # Get all available sheets from first file
+                    sheets <- excel_sheets(files[1])
+                    showModal(modalDialog(
+                        title = "Select Sheet to Combine",
+                        selectInput("combine_sheet", "Select Sheet Name:", choices = sheets),
+                        footer = tagList(
+                            modalButton("Cancel"),
+                            actionButton("ok_combine_sheet", "OK")
+                        )
+                    ))
                 } else {
-                    showNotification("No valid data found in files", type = "warning")
+                    # Original folder loading logic for mixed file types
+                    files <- list.files(folder, pattern = "\\.csv$|\\.xlsx$|\\.xls$", 
+                                      full.names = TRUE)
+                    processFiles(files)
                 }
+            })
+        }
+    })
+    
+    # Add new function to process files
+    processFiles <- function(files, sheet_name = NULL) {
+        all_data <- list()
+        for(i in seq_along(files)) {
+            incProgress(i/length(files), 
+                      detail = paste("Processing", basename(files[i])))
+            
+            ext <- tolower(tools::file_ext(files[i]))
+            
+            if(ext == "csv") {
+                data <- optimized_read_file(files[i])
+            } else if(ext %in% c("xls", "xlsx")) {
+                if(!is.null(sheet_name)) {
+                    # Use specified sheet name for all Excel files
+                    data <- tryCatch({
+                        as.data.table(read_excel(files[i], sheet = sheet_name))
+                    }, error = function(e) {
+                        showNotification(
+                            paste("Error reading sheet from", basename(files[i])), 
+                            type = "warning"
+                        )
+                        NULL
+                    })
+                } else {
+                    data <- safe_read_excel(files[i])
+                }
+            }
+            
+            if(!is.null(data) && nrow(data) > 0) {
+                all_data[[length(all_data) + 1]] <- data
+            }
+            gc()
+        }
+        
+        if(length(all_data) > 0) {
+            combined_data <- rbindlist(all_data, fill = TRUE, use.names = TRUE)
+            combined_data <- compress_dataset(combined_data)
+            
+            current_data <- datasets()
+            new_name <- "combined_data"
+            if(new_name %in% names(current_data)) {
+                counter <- 1
+                while(paste0(new_name, "_", counter) %in% names(current_data)) {
+                    counter <- counter + 1
+                }
+                new_name <- paste0(new_name, "_", counter)
+            }
+            current_data[[new_name]] <- combined_data
+            datasets(current_data)
+            updateAllSelectInputs(session)
+            
+            showNotification(paste("Successfully loaded", length(files), "files"), type = "message")
+        } else {
+            showNotification("No valid data found in files", type = "warning")
+        }
+    }
+    
+    # Add handler for sheet selection
+    observeEvent(input$ok_combine_sheet, {
+        req(input$combine_sheet)
+        removeModal()
+        
+        folder <- choose.dir(caption = "Select folder containing data files")
+        if (!is.null(folder)) {
+            withProgress(message = 'Loading folder contents', value = 0, {
+                files <- list.files(folder, pattern = "\\.xlsx$|\\.xls$", 
+                                  full.names = TRUE)
+                processFiles(files, input$combine_sheet)
             })
         }
     })
