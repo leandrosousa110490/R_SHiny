@@ -1,4 +1,3 @@
-
 # Load required libraries
 library(shiny)
 library(shinydashboard)
@@ -519,10 +518,14 @@ server <- function(input, output, session) {
         }
     })
     
+    # Add reactive value to store folder path
+    selected_folder <- reactiveVal(NULL)
+    
     # Handle folder loading
     observeEvent(input$load_folder, {
         folder <- choose.dir(caption = "Select folder containing data files")
         if (!is.null(folder)) {
+            selected_folder(folder)  # Store the selected folder path
             withProgress(message = 'Loading folder contents', value = 0, {
                 files <- list.files(folder, pattern = "\\.xlsx$|\\.xls$", 
                                   full.names = TRUE)
@@ -608,17 +611,14 @@ server <- function(input, output, session) {
     
     # Add handler for sheet selection
     observeEvent(input$ok_combine_sheet, {
-        req(input$combine_sheet)
+        req(input$combine_sheet, selected_folder())
         removeModal()
         
-        folder <- choose.dir(caption = "Select folder containing data files")
-        if (!is.null(folder)) {
-            withProgress(message = 'Loading folder contents', value = 0, {
-                files <- list.files(folder, pattern = "\\.xlsx$|\\.xls$", 
-                                  full.names = TRUE)
-                processFiles(files, input$combine_sheet)
-            })
-        }
+        withProgress(message = 'Loading folder contents', value = 0, {
+            files <- list.files(selected_folder(), pattern = "\\.xlsx$|\\.xls$", 
+                              full.names = TRUE)
+            processFiles(files, input$combine_sheet)
+        })
     })
 
 
