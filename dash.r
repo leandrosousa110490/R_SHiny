@@ -1,3 +1,4 @@
+
 # Load required libraries
 library(shiny)
 library(shinydashboard)
@@ -12,10 +13,158 @@ library(odbc)
 library(RMySQL)
 library(RPostgres)
 library(RSQLite)
+library(future)
+library(promises)
+library(memoise)
+library(pryr)
+library(bit64)
+library(arrow)
+library(dtplyr)
+
+# Configure parallel processing
+future::plan(multicore)
+options(future.globals.maxSize = 8000 * 1024^2)  # 8GB limit for future
+options(datatable.print.class = TRUE)
+options(datatable.optimize = TRUE)
+
+# Helper functions for large data handling
+chunk_read_csv <- function(file_path, chunk_size = 100000) {
+    con <- file(file_path, "r")
+    header <- read.csv(con, nrows = 1, header = TRUE)
+    
+    chunks <- list()
+    while (TRUE) {
+        chunk <- tryCatch(
+            read.csv(con, nrows = chunk_size, header = FALSE, col.names = names(header)),
+            error = function(e) NULL
+        )
+        if (is.null(chunk) || nrow(chunk) == 0) break
+        chunks[[length(chunks) + 1]] <- as.data.table(chunk)
+        gc()  # Force garbage collection after each chunk
+    }
+    close(con)
+    rbindlist(chunks)
+}
+
+sample_large_dataset <- function(dt, n = 1000) {
+    if (nrow(dt) <= n) return(dt)
+    dt[sample(nrow(dt), n)]
+}
+
+get_memory_usage <- function() {
+    mem <- pryr::mem_used()
+    paste0("Memory Usage: ", round(mem/1024/1024, 2), " MB")
+}
+
+# Cache function for database queries
+cached_query <- memoise(function(conn, query) {
+    dbGetQuery(conn, query)
+})
+
+# Add safe Excel reading function
+safe_read_excel <- function(file_path) {
+    tryCatch({
+        # Read with minimal options
+        data <- read_excel(
+            file_path,
+            sheet = 1,
+            col_names = TRUE,
+            na = ""
+        )
+        
+        # Convert to data.table if successful
+        if(!is.null(data) && nrow(data) > 0 && ncol(data) > 0) {
+            return(as.data.table(data))
+        }
+        return(NULL)
+    }, error = function(e) {
+        return(NULL)
+    })
+}
+
+# Compress large datasets
+compress_dataset <- function(dt) {
+    for (col in names(dt)) {
+        if (is.character(dt[[col]])) {
+            dt[, (col) := as.factor(get(col))]
+        } else if (is.numeric(dt[[col]])) {
+            if (all(floor(dt[[col]]) == dt[[col]], na.rm = TRUE)) {
+                if (max(dt[[col]], na.rm = TRUE) <= .Machine$integer.max) {
+                    dt[, (col) := as.integer(get(col))]
+                }
+            }
+        }
+    }
+    gc()
+    return(dt)
+}
+
+# Batch processing for data operations
+batch_process <- function(dt, fn, batch_size = 50000) {
+    total_rows <- nrow(dt)
+    batches <- ceiling(total_rows / batch_size)
+    result <- vector("list", batches)
+    
+    withProgress(message = 'Processing data', value = 0, {
+        for(i in 1:batches) {
+            start_idx <- (i-1) * batch_size + 1
+            end_idx <- min(i * batch_size, total_rows)
+            batch <- dt[start_idx:end_idx]
+            result[[i]] <- fn(batch)
+            incProgress(i/batches)
+            gc()
+        }
+    })
+    
+    rbindlist(result, fill = TRUE)
+}
+
+# Optimized data loading function
+optimized_read_file <- function(file_path) {
+    ext <- tolower(file_ext(file_path))
+    withProgress(message = 'Reading file', value = 0, {
+        tryCatch({
+            if (ext == "csv") {
+                # Use Arrow for CSV files
+                incProgress(0.3, detail = "Loading data with Arrow...")
+                data <- arrow::read_csv_arrow(file_path) %>%
+                    as.data.table()
+                incProgress(0.7)
+                return(data)
+            }
+            return(NULL)
+        }, error = function(e) {
+            showNotification(paste("Error reading file:", e$message), type = "error")
+            return(NULL)
+        })
+    })
+}
+
+
+
+# Memory-efficient data manipulation
+safe_merge <- function(dt1, dt2, by.x, by.y, type = "inner") {
+    gc()  # Force garbage collection before merge
+    result <- tryCatch({
+        merge(dt1, dt2, by.x = by.x, by.y = by.y, 
+              all.x = type %in% c("left", "full"),
+              all.y = type %in% c("right", "full"))
+    }, error = function(e) {
+        showNotification("Memory limit reached during merge. Try reducing data size.", type = "error")
+        return(NULL)
+    })
+    gc()  # Force garbage collection after merge
+    result
+}
 
 # UI Definition
 ui <- dashboardPage(
-    dashboardHeader(title = "Advanced Data Dashboard"),
+    dashboardHeader(
+        title = "Advanced Data Dashboard",
+        tags$li(class = "dropdown",
+                tags$a(id = "memory_usage",
+                      style = "padding: 15px; color: white;"))
+    ),
     dashboardSidebar(
         sidebarMenu(
             menuItem("Data Sources", tabName = "sources", icon = icon("database"),
@@ -234,58 +383,42 @@ server <- function(input, output, session) {
         }
     })
     
-    # Function to read files based on extension
-    read_file <- function(file_path) {
-        ext <- tolower(file_ext(file_path))
-        tryCatch({
-            if (ext == "csv") {
-                fread(file_path)
-            } else if (ext %in% c("xls", "xlsx")) {
-                # Get sheet names
-                sheets <- excel_sheets(file_path)
-                # Create modal dialog for sheet selection
-                showModal(modalDialog(
-                    title = "Select Excel Sheet",
-                    selectInput("sheet_select", "Available Sheets:", 
-                              choices = sheets),
-                    footer = tagList(
-                        modalButton("Cancel"),
-                        actionButton("ok_sheet", "OK")
-                    )
-                ))
-                return(NULL)  # Return NULL initially
-            }
-        }, error = function(e) {
-            showNotification(paste("Error reading file:", e$message), 
-                            type = "error")
-            return(NULL)
-        })
-    }
+    # Function to read files based on extension with optimizations
+    read_file <- optimized_read_file
+
     
-    # Handle file uploads with duplicate name handling
+    # Handle file uploads with compression
     observeEvent(input$files, {
         req(input$files)
-        current_data <- datasets()
-        
-        for(i in seq_along(input$files$name)) {
-            base_name <- tools::file_path_sans_ext(input$files$name[i])
-            new_data <- read_file(input$files$datapath[i])
+        withProgress(message = 'Processing files', value = 0, {
+            current_data <- datasets()
             
-            if (!is.null(new_data)) {
-                # Handle duplicate names
-                if (base_name %in% names(current_data)) {
-                    counter <- 1
-                    while(paste0(base_name, "_", counter) %in% names(current_data)) {
-                        counter <- counter + 1
+            for(i in seq_along(input$files$name)) {
+                incProgress(i/length(input$files$name), 
+                          detail = paste("Processing", input$files$name[i]))
+                
+                base_name <- tools::file_path_sans_ext(input$files$name[i])
+                new_data <- optimized_read_file(input$files$datapath[i])
+                
+                if (!is.null(new_data)) {
+                    # Compress dataset
+                    new_data <- compress_dataset(new_data)
+                    
+                    # Handle duplicate names
+                    if (base_name %in% names(current_data)) {
+                        counter <- 1
+                        while(paste0(base_name, "_", counter) %in% names(current_data)) {
+                            counter <- counter + 1
+                        }
+                        base_name <- paste0(base_name, "_", counter)
                     }
-                    base_name <- paste0(base_name, "_", counter)
+                    current_data[[base_name]] <- new_data
                 }
-                current_data[[base_name]] <- new_data
             }
-        }
-        
-        datasets(current_data)
-        updateAllSelectInputs(session)
+            
+            datasets(current_data)
+            updateAllSelectInputs(session)
+        })
     })
 
     # Function to update all select inputs
@@ -390,15 +523,58 @@ server <- function(input, output, session) {
     observeEvent(input$load_folder, {
         folder <- choose.dir(caption = "Select folder containing data files")
         if (!is.null(folder)) {
-            files <- list.files(folder, pattern = "\\.csv$|\\.xlsx$|\\.xls$", 
-                              full.names = TRUE)
-            all_data <- rbindlist(
-                lapply(files, read_file),
-                fill = TRUE
-            )
-            datasets(all_data)
+            withProgress(message = 'Loading folder contents', value = 0, {
+                files <- list.files(folder, pattern = "\\.csv$|\\.xlsx$|\\.xls$", 
+                                  full.names = TRUE)
+                
+                all_data <- list()
+                for(i in seq_along(files)) {
+                    incProgress(i/length(files), 
+                              detail = paste("Processing", basename(files[i])))
+                    
+                    ext <- tolower(tools::file_ext(files[i]))
+                    
+                    if(ext == "csv") {
+                        data <- optimized_read_file(files[i])
+                    } else if(ext %in% c("xls", "xlsx")) {
+                        data <- safe_read_excel(files[i])
+                    }
+                    
+                    if(!is.null(data) && nrow(data) > 0) {
+                        all_data[[length(all_data) + 1]] <- data
+                    }
+                    gc()
+                }
+                
+                if(length(all_data) > 0) {
+                    combined_data <- rbindlist(all_data, fill = TRUE, use.names = TRUE)
+                    combined_data <- compress_dataset(combined_data)
+                    
+                    current_data <- datasets()
+                    new_name <- "combined_data"
+                    if(new_name %in% names(current_data)) {
+                        counter <- 1
+                        while(paste0(new_name, "_", counter) %in% names(current_data)) {
+                            counter <- counter + 1
+                        }
+                        new_name <- paste0(new_name, "_", counter)
+                    }
+                    current_data[[new_name]] <- combined_data
+                    datasets(current_data)
+                    updateAllSelectInputs(session)
+                    
+                    showNotification(paste("Successfully loaded", length(files), "files"), type = "message")
+                } else {
+                    showNotification("No valid data found in files", type = "warning")
+                }
+            })
         }
     })
+
+
+
+
+
     
     # Generate tabs for each dataset
     output$table_tabs <- renderUI({
@@ -423,24 +599,31 @@ server <- function(input, output, session) {
         datasets(current_data)
     })
     
-    # Render individual tables
+    # Render individual tables with optimizations
     observe({
         req(datasets())
         for(name in names(datasets())) {
             local({
                 local_name <- name
                 output[[paste0("table_", gsub("[^[:alnum:]]", "", local_name))]] <- renderDT({
+                    data <- datasets()[[local_name]]
+                    # Sample data for preview
+                    preview_data <- sample_large_dataset(data)
+                    
                     datatable(
-                        datasets()[[local_name]],
+                        preview_data,
                         options = list(
                             pageLength = input$page_size,
                             processing = TRUE,
+                            serverSide = TRUE,
                             scrollX = TRUE,
                             scrollY = "400px",
                             dom = 'Bfrtip',
-                            buttons = c('copy', 'csv', 'excel', 'pdf', 'print')
+                            buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+                            deferRender = TRUE,
+                            scroller = TRUE
                         ),
-                        extensions = c('Buttons'),
+                        extensions = c('Buttons', 'Scroller'),
                         filter = 'top',
                         style = 'bootstrap',
                         class = 'cell-border stripe'
@@ -513,10 +696,26 @@ server <- function(input, output, session) {
         })
     })
     
-    # Initialize esquisse
+    # Add memory monitoring
+    observe({
+        invalidateLater(5000)  # Update every 5 seconds
+        shinyjs::html("memory_usage", get_memory_usage())
+    })
+    
+    # Optimize visualization data handling
     observeEvent(input$viz_table, {
         req(input$viz_table)
         data <- datasets()[[input$viz_table]]
+        
+        # Sample data for visualization if too large
+        if(nrow(data) > 10000) {
+            data <- sample_large_dataset(data, n = 10000)
+            showNotification(
+                "Dataset sampled to 10,000 rows for visualization", 
+                type = "warning"
+            )
+        }
+        
         esquisse::esquisse_server(
             id = "esquisse",
             data = data
@@ -712,26 +911,47 @@ server <- function(input, output, session) {
         selectInput("db_table", "Select Table", choices = tables)
     })
     
-    # Load data from selected database table
+    # Optimize database loading with chunking
     observeEvent(input$db_table, {
         req(db_conn(), input$db_table)
-        tryCatch({
-            data <- dbGetQuery(db_conn(), 
-                             paste("SELECT * FROM", input$db_table, "LIMIT 100000"))
-            
-            current_data <- datasets()
-            current_data[[input$db_table]] <- as.data.table(data)
-            datasets(current_data)
-            
-            # Update choices for all select inputs
-            updateSelectInput(session, "table1", choices = names(datasets()))
-            updateSelectInput(session, "table2", choices = names(datasets()))
-            updateSelectizeInput(session, "tables_to_append", choices = names(datasets()))
-            updateSelectInput(session, "sum_table", choices = names(datasets()))
-            updateSelectInput(session, "viz_table", choices = names(datasets()))
-            
-        }, error = function(e) {
-            showNotification(paste("Error loading table:", e$message), type = "error")
+        withProgress(message = 'Loading database table', value = 0, {
+            tryCatch({
+                # Get total count
+                count_query <- sprintf("SELECT COUNT(*) as count FROM %s", input$db_table)
+                total_rows <- dbGetQuery(db_conn(), count_query)$count
+                
+                chunk_size <- 50000
+                chunks <- ceiling(total_rows / chunk_size)
+                
+                all_data <- data.table()
+                
+                for(i in 1:chunks) {
+                    incProgress(i/chunks, 
+                              detail = sprintf("Loading chunk %d of %d", i, chunks))
+                    
+                    offset <- (i-1) * chunk_size
+                    query <- sprintf(
+                        "SELECT * FROM %s LIMIT %d OFFSET %d", 
+                        input$db_table, chunk_size, offset
+                    )
+                    chunk_data <- as.data.table(dbGetQuery(db_conn(), query))
+                    all_data <- rbindlist(list(all_data, chunk_data), fill=TRUE)
+                    
+                    # Force garbage collection
+                    gc()
+                }
+                
+                current_data <- datasets()
+                current_data[[input$db_table]] <- all_data
+                datasets(current_data)
+                updateAllSelectInputs(session)
+                
+            }, error = function(e) {
+                showNotification(
+                    paste("Error loading table:", e$message), 
+                    type = "error"
+                )
+            })
         })
     })
     
