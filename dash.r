@@ -130,16 +130,23 @@ optimized_read_file <- function(file_path) {
                     as.data.table()
                 incProgress(0.7)
                 return(data)
+            } else if (ext %in% c("xls", "xlsx")) {
+                # Use readxl for Excel files
+                incProgress(0.3, detail = "Loading data with readxl...")
+                data <- read_excel(file_path) %>%
+                    as.data.table()
+                incProgress(0.7)
+                return(data)
+            } else {
+                showNotification(paste("Unsupported file type:", ext), type = "error")
+                return(NULL)
             }
-            return(NULL)
         }, error = function(e) {
             showNotification(paste("Error reading file:", e$message), type = "error")
             return(NULL)
         })
     })
 }
-
-
 
 # Memory-efficient data manipulation
 safe_merge <- function(dt1, dt2, by.x, by.y, type = "inner") {
@@ -236,7 +243,9 @@ ui <- dashboardPage(
                         fileInput("files", "Upload Data Files", 
                                 multiple = TRUE,
                                 accept = c(".csv", ".xlsx", ".xls")),
-                        actionButton("load_folder", "Load Folder"),
+                        fileInput("folder", "Select Folder Containing Data Files", 
+                                multiple = TRUE,
+                                accept = c(".csv", ".xlsx", ".xls")),
                         numericInput("page_size", "Rows per page:", 
                                    value = 500, min = 100, max = 1000)
                     )
@@ -261,7 +270,10 @@ ui <- dashboardPage(
                                             "Append Tables" = "append",
                                             "Summarize Data" = "summarize",
                                             "Inspect Data Types" = "inspect",
-                                            "Remove Columns" = "remove")),
+                                            "Remove Columns" = "remove",
+                                            "Remove Duplicates" = "remove_duplicates",
+                                            "Keep Only Duplicates" = "keep_duplicates",
+                                            "Replace Value" = "replace_value")),
                         # Merge Panel
                         conditionalPanel(
                             condition = "input.manipulation_type == 'merge'",
@@ -323,6 +335,32 @@ ui <- dashboardPage(
                                          choices = NULL, multiple = TRUE),
                             actionButton("do_remove", "Remove Columns",
                                        class = "btn-warning")
+                        ),
+                        # Add Remove Duplicates Panel
+                        conditionalPanel(
+                            condition = "input.manipulation_type == 'remove_duplicates'",
+                            selectInput("remove_duplicates_table", "Select Table", choices = NULL),
+                            selectizeInput("remove_duplicates_columns", "Select Columns to Check for Duplicates",
+                                         choices = NULL, multiple = TRUE),
+                            actionButton("do_remove_duplicates", "Remove Duplicates", class = "btn-warning")
+                        ),
+                        # Add Keep Only Duplicates Panel
+                        conditionalPanel(
+                            condition = "input.manipulation_type == 'keep_duplicates'",
+                            selectInput("keep_duplicates_table", "Select Table", choices = NULL),
+                            selectizeInput("keep_duplicates_columns", "Select Columns to Check for Duplicates",
+                                         choices = NULL, multiple = TRUE),
+                            actionButton("do_keep_duplicates", "Keep Only Duplicates", class = "btn-warning")
+                        ),
+                        # Add Replace Value Panel
+                        conditionalPanel(
+                            condition = "input.manipulation_type == 'replace_value'",
+                            selectInput("replace_value_table", "Select Table", choices = NULL),
+                            selectizeInput("replace_value_columns", "Select Columns to Replace Values",
+                                         choices = NULL, multiple = TRUE),
+                            textInput("old_value", "Old Value"),
+                            textInput("new_value", "New Value"),
+                            actionButton("do_replace_value", "Replace Value", class = "btn-warning")
                         )
                     ),
                     box(width = 6,
@@ -412,6 +450,8 @@ server <- function(input, output, session) {
                         base_name <- paste0(base_name, "_", counter)
                     }
                     current_data[[base_name]] <- new_data
+                } else {
+                    showNotification(paste("Failed to load data from", input$files$name[i]), type = "error")
                 }
             }
             
@@ -430,6 +470,9 @@ server <- function(input, output, session) {
         updateSelectInput(session, "viz_table", choices = choices)
         updateSelectInput(session, "inspect_table", choices = choices)
         updateSelectInput(session, "remove_table", choices = choices)
+        updateSelectInput(session, "remove_duplicates_table", choices = choices)
+        updateSelectInput(session, "keep_duplicates_table", choices = choices)
+        updateSelectInput(session, "replace_value_table", choices = choices)
     }
 
     # Update merge columns when tables are selected
@@ -480,26 +523,15 @@ server <- function(input, output, session) {
                                       do.call(paste0, df1[input$merge_by_table1]), ]
             )
             
-            # Handle duplicate names
-            new_name <- paste0(input$table1, "_merged_", input$table2)
+            # Update datasets
             current_data <- datasets()
-            if (new_name %in% names(current_data)) {
-                counter <- 1
-                while(paste0(new_name, "_", counter) %in% names(current_data)) {
-                    counter <- counter + 1
-                }
-                new_name <- paste0(new_name, "_", counter)
-            }
-            
-            current_data[[new_name]] <- merged_data
+            current_data[[input$table1]] <- merged_data
             datasets(current_data)
             updateAllSelectInputs(session)
-            showNotification(paste("Merged data saved as:", new_name), 
-                           type = "message")
+            showNotification("Merged data successfully.", type = "message")
             
         }, error = function(e) {
-            showNotification(paste("Merge failed:", e$message), 
-                           type = "error")
+            showNotification(paste("Merge failed:", e$message), type = "error")
         })
     })
 
@@ -522,34 +554,28 @@ server <- function(input, output, session) {
     selected_folder <- reactiveVal(NULL)
     
     # Handle folder loading
-    observeEvent(input$load_folder, {
-        folder <- choose.dir(caption = "Select folder containing data files")
-        if (!is.null(folder)) {
-            selected_folder(folder)  # Store the selected folder path
-            withProgress(message = 'Loading folder contents', value = 0, {
-                files <- list.files(folder, pattern = "\\.xlsx$|\\.xls$", 
-                                  full.names = TRUE)
-                
-                # Check if we have only Excel files
-                if(length(files) > 0 && all(tolower(tools::file_ext(files)) %in% c("xls", "xlsx"))) {
-                    # Get all available sheets from first file
-                    sheets <- excel_sheets(files[1])
-                    showModal(modalDialog(
-                        title = "Select Sheet to Combine",
-                        selectInput("combine_sheet", "Select Sheet Name:", choices = sheets),
-                        footer = tagList(
-                            modalButton("Cancel"),
-                            actionButton("ok_combine_sheet", "OK")
-                        )
-                    ))
-                } else {
-                    # Original folder loading logic for mixed file types
-                    files <- list.files(folder, pattern = "\\.csv$|\\.xlsx$|\\.xls$", 
-                                      full.names = TRUE)
-                    processFiles(files)
-                }
-            })
-        }
+    observeEvent(input$folder, {
+        req(input$folder)
+        withProgress(message = 'Loading folder contents', value = 0, {
+            files <- input$folder$datapath
+            
+            # Check if we have only Excel files
+            if(length(files) > 0 && all(tolower(tools::file_ext(files)) %in% c("xls", "xlsx"))) {
+                # Get all available sheets from first file
+                sheets <- excel_sheets(files[1])
+                showModal(modalDialog(
+                    title = "Select Sheet to Combine",
+                    selectInput("combine_sheet", "Select Sheet Name:", choices = sheets),
+                    footer = tagList(
+                        modalButton("Cancel"),
+                        actionButton("ok_combine_sheet", "OK")
+                    )
+                ))
+            } else {
+                # Original folder loading logic for mixed file types
+                processFiles(files)
+            }
+        })
     })
     
     # Add new function to process files
@@ -595,7 +621,7 @@ server <- function(input, output, session) {
             if(new_name %in% names(current_data)) {
                 counter <- 1
                 while(paste0(new_name, "_", counter) %in% names(current_data)) {
-                    counter <- counter + 1
+                    counter <- 1
                 }
                 new_name <- paste0(new_name, "_", counter)
             }
@@ -611,12 +637,11 @@ server <- function(input, output, session) {
     
     # Add handler for sheet selection
     observeEvent(input$ok_combine_sheet, {
-        req(input$combine_sheet, selected_folder())
+        req(input$combine_sheet, input$folder)
         removeModal()
         
         withProgress(message = 'Loading folder contents', value = 0, {
-            files <- list.files(selected_folder(), pattern = "\\.xlsx$|\\.xls$", 
-                              full.names = TRUE)
+            files <- input$folder$datapath
             processFiles(files, input$combine_sheet)
         })
     })
@@ -722,23 +747,12 @@ server <- function(input, output, session) {
                                .names = "{.col}_{.fn}"),
                          .groups = "drop")
             
-            # Handle duplicate names
-            new_name <- paste0(input$sum_table, "_summary")
-            current_data <- datasets()
-            if (new_name %in% names(current_data)) {
-                counter <- 1
-                while(paste0(new_name, "_", counter) %in% names(current_data)) {
-                    counter <- counter + 1
-                }
-                new_name <- paste0(new_name, "_", counter)
-            }
-            
             # Update datasets
-            current_data[[new_name]] <- as.data.table(summary_data)
+            current_data <- datasets()
+            current_data[[input$sum_table]] <- as.data.table(summary_data)
             datasets(current_data)
             updateAllSelectInputs(session)
-            showNotification(paste("Summary data saved as:", new_name), 
-                           type = "message")
+            showNotification("Summary data created successfully.", type = "message")
             
         }, error = function(e) {
             showNotification(paste("Summarize failed:", e$message), 
@@ -1039,29 +1053,112 @@ server <- function(input, output, session) {
             # Remove selected columns
             data_subset <- data[, !(names(data) %in% input$columns_to_remove), with = FALSE]
             
-            # Create new name for modified dataset
-            new_name <- paste0(input$remove_table, "_modified")
-            current_data <- datasets()
-            if (new_name %in% names(current_data)) {
-                counter <- 1
-                while(paste0(new_name, "_", counter) %in% names(current_data)) {
-                    counter <- counter + 1
-                }
-                new_name <- paste0(new_name, "_", counter)
-            }
-            
             # Update datasets
-            current_data[[new_name]] <- data_subset
+            current_data <- datasets()
+            current_data[[input$remove_table]] <- data_subset
             datasets(current_data)
             updateAllSelectInputs(session)
             
             # Show success message
-            showNotification(paste("Columns removed. New dataset saved as:", new_name), 
-                           type = "message")
+            showNotification("Columns removed successfully.", type = "message")
             
         }, error = function(e) {
-            showNotification(paste("Error removing columns:", e$message), 
-                           type = "error")
+            showNotification(paste("Error removing columns:", e$message), type = "error")
+        })
+    })
+
+    # Update columns for remove duplicates and keep duplicates when table is selected
+    observeEvent(input$remove_duplicates_table, {
+        req(input$remove_duplicates_table)
+        data <- datasets()[[input$remove_duplicates_table]]
+        if (!is.null(data)) {
+            updateSelectizeInput(session, "remove_duplicates_columns", choices = names(data))
+        }
+    })
+
+    observeEvent(input$keep_duplicates_table, {
+        req(input$keep_duplicates_table)
+        data <- datasets()[[input$keep_duplicates_table]]
+        if (!is.null(data)) {
+            updateSelectizeInput(session, "keep_duplicates_columns", choices = names(data))
+        }
+    })
+
+    # Handle remove duplicates operation
+    observeEvent(input$do_remove_duplicates, {
+        req(input$remove_duplicates_table, input$remove_duplicates_columns)
+        
+        tryCatch({
+            data <- datasets()[[input$remove_duplicates_table]]
+            data <- data[!duplicated(data, by = input$remove_duplicates_columns)]
+            
+            # Update datasets
+            current_data <- datasets()
+            current_data[[input$remove_duplicates_table]] <- data
+            datasets(current_data)
+            updateAllSelectInputs(session)
+            
+            # Show success message
+            showNotification("Duplicates removed successfully.", type = "message")
+            
+        }, error = function(e) {
+            showNotification(paste("Error removing duplicates:", e$message), type = "error")
+        })
+    })
+
+    # Handle keep only duplicates operation
+    observeEvent(input$do_keep_duplicates, {
+        req(input$keep_duplicates_table, input$keep_duplicates_columns)
+        
+        tryCatch({
+            data <- datasets()[[input$keep_duplicates_table]]
+            data <- data[duplicated(data, by = input$keep_duplicates_columns) | 
+                         duplicated(data, by = input$keep_duplicates_columns, fromLast = TRUE)]
+            
+            # Update datasets
+            current_data <- datasets()
+            current_data[[input$keep_duplicates_table]] <- data
+            datasets(current_data)
+            updateAllSelectInputs(session)
+            
+            # Show success message
+            showNotification("Only duplicates kept successfully.", type = "message")
+            
+        }, error = function(e) {
+            showNotification(paste("Error keeping only duplicates:", e$message), type = "error")
+        })
+    })
+
+    # Update columns for replace value when table is selected
+    observeEvent(input$replace_value_table, {
+        req(input$replace_value_table)
+        data <- datasets()[[input$replace_value_table]]
+        if (!is.null(data)) {
+            updateSelectizeInput(session, "replace_value_columns", choices = names(data))
+        }
+    })
+
+    # Handle replace value operation
+    observeEvent(input$do_replace_value, {
+        req(input$replace_value_table, input$replace_value_columns, input$old_value, input$new_value)
+        
+        tryCatch({
+            data <- datasets()[[input$replace_value_table]]
+            for (col in input$replace_value_columns) {
+                data[[col]][data[[col]] == input$old_value] <- input$new_value
+            }
+            
+            # Update datasets
+            current_data <- datasets()
+            current_data[[input$replace_value_table]] <- data
+            datasets(current_data)
+            updateAllSelectInputs(session)
+            
+            # Show success message
+            showNotification("Values replaced successfully.", type = "message")
+            
+        }, error = function(e) {
+            showNotification(paste("Error replacing values:", e$message), type = "error")
         })
     })
 }
