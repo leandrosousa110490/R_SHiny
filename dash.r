@@ -19,6 +19,7 @@ library(pryr)
 library(bit64)
 library(arrow)
 library(dtplyr)
+library(prophet)  # Add prophet library
 
 # Configure parallel processing
 future::plan(multicore)
@@ -179,7 +180,8 @@ ui <- dashboardPage(
             ),
             menuItem("Data Management", tabName = "data", icon = icon("table")),
             menuItem("Data Manipulation", tabName = "manipulation", icon = icon("tools")),
-            menuItem("Visualization", tabName = "viz", icon = icon("chart-bar"))
+            menuItem("Visualization", tabName = "viz", icon = icon("chart-bar")),
+            menuItem("Forecasting", tabName = "forecasting", icon = icon("chart-line"))  # Add Forecasting menu item
         )
     ),
     dashboardBody(
@@ -383,6 +385,29 @@ ui <- dashboardPage(
                         )
                     )
                 )
+            ),
+            tabItem(tabName = "forecasting",
+                fluidRow(
+                    box(width = 12,
+                        title = "Forecasting with Prophet",
+                        status = "primary",
+                        solidHeader = TRUE,
+                        selectInput("forecast_table", "Select Table", choices = NULL),
+                        selectInput("date_column", "Select Date Column", choices = NULL),
+                        selectInput("value_column", "Select Value Column", choices = NULL),
+                        numericInput("forecast_period", "Forecast Period (days)", value = 30, min = 1),
+                        actionButton("run_forecast", "Run Forecast", class = "btn-primary")
+                    )
+                ),
+                fluidRow(
+                    box(width = 12,
+                        title = "Forecast Results",
+                        status = "info",
+                        solidHeader = TRUE,
+                        plotOutput("forecast_plot"),
+                        DTOutput("forecast_table")
+                    )
+                )
             )
         )
     )
@@ -435,23 +460,66 @@ server <- function(input, output, session) {
                           detail = paste("Processing", input$files$name[i]))
                 
                 base_name <- tools::file_path_sans_ext(input$files$name[i])
-                new_data <- optimized_read_file(input$files$datapath[i])
+                ext <- tolower(file_ext(input$files$name[i]))
                 
-                if (!is.null(new_data)) {
-                    # Compress dataset
-                    new_data <- compress_dataset(new_data)
+                if (ext %in% c("xls", "xlsx")) {
+                    # Get all available sheets from the Excel file
+                    sheets <- excel_sheets(input$files$datapath[i])
+                    showModal(modalDialog(
+                        title = paste("Select Sheet for", input$files$name[i]),
+                        selectInput(paste0("sheet_select_", i), "Select Sheet Name:", choices = sheets),
+                        footer = tagList(
+                            modalButton("Cancel"),
+                            actionButton(paste0("ok_sheet_", i), "OK")
+                        )
+                    ))
                     
-                    # Handle duplicate names
-                    if (base_name %in% names(current_data)) {
-                        counter <- 1
-                        while(paste0(base_name, "_", counter) %in% names(current_data)) {
-                            counter <- counter + 1
+                    observeEvent(input[[paste0("ok_sheet_", i)]], {
+                        removeModal()
+                        sheet_name <- input[[paste0("sheet_select_", i)]]
+                        new_data <- tryCatch({
+                            as.data.table(read_excel(input$files$datapath[i], sheet = sheet_name))
+                        }, error = function(e) {
+                            showNotification(paste("Error reading sheet from", input$files$name[i]), type = "error")
+                            NULL
+                        })
+                        
+                        if (!is.null(new_data)) {
+                            # Compress dataset
+                            new_data <- compress_dataset(new_data)
+                            
+                            # Handle duplicate names
+                            if (base_name %in% names(current_data)) {
+                                counter <- 1
+                                while(paste0(base_name, "_", counter) %in% names(current_data)) {
+                                    counter <- counter + 1
+                                }
+                                base_name <- paste0(base_name, "_", counter)
+                            }
+                            current_data[[base_name]] <- new_data
+                            datasets(current_data)
+                            updateAllSelectInputs(session)
                         }
-                        base_name <- paste0(base_name, "_", counter)
-                    }
-                    current_data[[base_name]] <- new_data
+                    })
                 } else {
-                    showNotification(paste("Failed to load data from", input$files$name[i]), type = "error")
+                    new_data <- optimized_read_file(input$files$datapath[i])
+                    
+                    if (!is.null(new_data)) {
+                        # Compress dataset
+                        new_data <- compress_dataset(new_data)
+                        
+                        # Handle duplicate names
+                        if (base_name %in% names(current_data)) {
+                            counter <- 1
+                            while(paste0(base_name, "_", counter) %in% names(current_data)) {
+                                counter <- counter + 1
+                            }
+                            base_name <- paste0(base_name, "_", counter)
+                        }
+                        current_data[[base_name]] <- new_data
+                    } else {
+                        showNotification(paste("Failed to load data from", input$files$name[i]), type = "error")
+                    }
                 }
             }
             
@@ -473,6 +541,7 @@ server <- function(input, output, session) {
         updateSelectInput(session, "remove_duplicates_table", choices = choices)
         updateSelectInput(session, "keep_duplicates_table", choices = choices)
         updateSelectInput(session, "replace_value_table", choices = choices)
+        updateSelectInput(session, "forecast_table", choices = choices)
     }
 
     # Update merge columns when tables are selected
@@ -1159,6 +1228,57 @@ server <- function(input, output, session) {
             
         }, error = function(e) {
             showNotification(paste("Error replacing values:", e$message), type = "error")
+        })
+    })
+
+    # Update columns for forecasting when table is selected
+    observeEvent(input$forecast_table, {
+        req(input$forecast_table)
+        data <- datasets()[[input$forecast_table]]
+        if (!is.null(data)) {
+            updateSelectInput(session, "date_column", choices = names(data))
+            updateSelectInput(session, "value_column", choices = names(data))
+        }
+    })
+
+    # Handle forecasting operation
+    observeEvent(input$run_forecast, {
+        req(input$forecast_table, input$date_column, input$value_column, input$forecast_period)
+        
+        tryCatch({
+            data <- datasets()[[input$forecast_table]]
+            df <- data[, .(ds = as.Date(get(input$date_column)), y = as.numeric(get(input$value_column)))]
+            
+            # Fit the model
+            m <- prophet(df)
+            
+            # Make future dataframe
+            future <- make_future_dataframe(m, periods = input$forecast_period)
+            
+            # Predict
+            forecast <- predict(m, future)
+            
+            # Update datasets with forecast
+            forecast_data <- data.table(ds = forecast$ds, yhat = forecast$yhat, yhat_lower = forecast$yhat_lower, yhat_upper = forecast$yhat_upper)
+            current_data <- datasets()
+            current_data[["forecast_results"]] <- forecast_data
+            datasets(current_data)
+            updateAllSelectInputs(session)
+            
+            # Plot forecast
+            output$forecast_plot <- renderPlot({
+                plot(m, forecast) + add_changepoints_to_plot(m)
+            })
+            
+            # Show forecast table
+            output$forecast_table <- renderDT({
+                datatable(forecast_data, options = list(pageLength = 10, scrollX = TRUE))
+            })
+            
+            showNotification("Forecast completed successfully.", type = "message")
+            
+        }, error = function(e) {
+            showNotification(paste("Error running forecast:", e$message), type = "error")
         })
     })
 }
