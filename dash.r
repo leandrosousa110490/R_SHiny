@@ -20,6 +20,7 @@ library(bit64)
 library(arrow)
 library(dtplyr)
 library(prophet)  # Add prophet library
+library(plotly)   # Add plotly library
 
 # Configure parallel processing
 future::plan(multicore)
@@ -404,7 +405,7 @@ ui <- dashboardPage(
                         title = "Forecast Results",
                         status = "info",
                         solidHeader = TRUE,
-                        plotOutput("forecast_plot"),
+                        plotlyOutput("forecast_plot"),  # Use plotlyOutput instead of plotOutput
                         DTOutput("forecast_table")
                     )
                 )
@@ -1265,9 +1266,12 @@ server <- function(input, output, session) {
             datasets(current_data)
             updateAllSelectInputs(session)
             
-            # Plot forecast
-            output$forecast_plot <- renderPlot({
-                plot(m, forecast) + add_changepoints_to_plot(m)
+            # Plot forecast using plotly
+            output$forecast_plot <- renderPlotly({
+                plot_ly() %>%
+                    add_lines(x = ~forecast$ds, y = ~forecast$yhat, name = 'Forecast') %>%
+                    add_ribbons(x = ~forecast$ds, ymin = ~forecast$yhat_lower, ymax = ~forecast$yhat_upper, name = 'Uncertainty', fillcolor = 'rgba(7, 164, 181, 0.2)', line = list(color = 'transparent')) %>%
+                    layout(title = 'Forecast', xaxis = list(title = 'Date'), yaxis = list(title = 'Value'))
             })
             
             # Show forecast table
