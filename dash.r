@@ -366,23 +366,53 @@ ui <- dashboardPage(
                       textInput("new_value", "New Value"),
                       actionButton("do_replace_value", "Replace Value", class = "btn-warning")
                     ),
-                    # Add Conditional Column Panel after other panels
+                    # Update Conditional Column Panel with multiple conditions
                     conditionalPanel(
                       condition = "input.manipulation_type == 'conditional'",
                       selectInput("conditional_table", "Select Table", choices = NULL),
                       textInput("new_column_name", "New Column Name"),
-                      selectInput("condition_column", "Column to Check", choices = NULL),
-                      selectInput("condition_operator", "Operator", 
-                                  choices = c("equals" = "==",
-                                              "not equals" = "!=",
-                                              "greater than" = ">",
-                                              "less than" = "<",
-                                              "greater or equal" = ">=",
-                                              "less or equal" = "<=",
-                                              "contains" = "contains",
-                                              "starts with" = "startswith",
-                                              "ends with" = "endswith")),
-                      textInput("condition_value", "Value to Compare"),
+                      
+                      # First condition
+                      tags$div(
+                        style = "border: 1px solid #ddd; padding: 10px; margin: 5px;",
+                        selectInput("condition_column_1", "Column to Check", choices = NULL),
+                        selectInput("condition_operator_1", "Operator", 
+                                    choices = c("equals" = "==",
+                                                "not equals" = "!=",
+                                                "greater than" = ">",
+                                                "less than" = "<",
+                                                "greater or equal" = ">=",
+                                                "less or equal" = "<=",
+                                                "contains" = "contains",
+                                                "starts with" = "startswith",
+                                                "ends with" = "endswith")),
+                        textInput("condition_value_1", "Value to Compare")
+                      ),
+                      
+                      # Logic selector for second condition
+                      selectInput("condition_logic", "Add Second Condition?", 
+                                  choices = c("None", "AND", "OR")),
+                      
+                      # Second condition (shown conditionally)
+                      conditionalPanel(
+                        condition = "input.condition_logic !== 'None'",
+                        tags$div(
+                          style = "border: 1px solid #ddd; padding: 10px; margin: 5px;",
+                          selectInput("condition_column_2", "Second Column to Check", choices = NULL),
+                          selectInput("condition_operator_2", "Second Operator", 
+                                      choices = c("equals" = "==",
+                                                  "not equals" = "!=",
+                                                  "greater than" = ">",
+                                                  "less than" = "<",
+                                                  "greater or equal" = ">=",
+                                                  "less or equal" = "<=",
+                                                  "contains" = "contains",
+                                                  "starts with" = "startswith",
+                                                  "ends with" = "endswith")),
+                          textInput("condition_value_2", "Second Value to Compare")
+                        )
+                      ),
+                      
                       textInput("true_value", "Value if True"),
                       textInput("false_value", "Value if False"),
                       actionButton("do_conditional", "Add Conditional Column", class = "btn-primary")
@@ -1119,47 +1149,6 @@ server <- function(input, output, session) {
     }
   })
   
-  # Update column choices when remove table is selected
-  observeEvent(input$remove_table, {
-    req(input$remove_table)
-    data <- datasets()[[input$remove_table]]
-    if (!is.null(data)) {
-      updateSelectizeInput(session, "columns_to_remove", 
-                           choices = names(data))
-    }
-  })
-  
-  # Handle remove columns operation
-  observeEvent(input$do_remove, {
-    req(input$remove_table, input$columns_to_remove)
-    
-    tryCatch({
-      data <- datasets()[[input$remove_table]]
-      
-      # Ensure we're not removing all columns
-      if (length(input$columns_to_remove) >= ncol(data)) {
-        showNotification("Cannot remove all columns from the table", 
-                         type = "error")
-        return()
-      }
-      
-      # Remove selected columns
-      data_subset <- data[, !(names(data) %in% input$columns_to_remove), with = FALSE]
-      
-      # Update datasets
-      current_data <- datasets()
-      current_data[[input$remove_table]] <- data_subset
-      datasets(current_data)
-      updateAllSelectInputs(session)
-      
-      # Show success message
-      showNotification("Columns removed successfully.", type = "message")
-      
-    }, error = function(e) {
-      showNotification(paste("Error removing columns:", e$message), type = "error")
-    })
-  })
-  
   # Update columns for remove duplicates and keep duplicates when table is selected
   observeEvent(input$remove_duplicates_table, {
     req(input$remove_duplicates_table)
@@ -1350,6 +1339,79 @@ server <- function(input, output, session) {
       datasets(current_data)
       updateAllSelectInputs(session)
       
+      showNotification("Conditional column added successfully.", type = "message")
+      
+    }, error = function(e) {
+      showNotification(paste("Error adding conditional column:", e$message), 
+                       type = "error")
+    })
+  })
+  
+  # Update both condition column choices when table is selected
+  observeEvent(input$conditional_table, {
+    req(input$conditional_table)
+    data <- datasets()[[input$conditional_table]]
+    if (!is.null(data)) {
+      updateSelectInput(session, "condition_column_1", choices = names(data))
+      updateSelectInput(session, "condition_column_2", choices = names(data))
+    }
+  })
+  
+  # Updated handle conditional column operation with multiple conditions
+  observeEvent(input$do_conditional, {
+    req(input$conditional_table, input$condition_column_1, 
+        input$condition_operator_1, input$condition_value_1,
+        input$true_value, input$false_value, input$new_column_name)
+    
+    tryCatch({
+      data <- copy(datasets()[[input$conditional_table]])  # Create a copy of the data
+      
+      # Evaluate first condition
+      result1 <- switch(input$condition_operator_1,
+                        "==" = data[[input$condition_column_1]] == input$condition_value_1,
+                        "!=" = data[[input$condition_column_1]] != input$condition_value_1,
+                        ">" = as.numeric(data[[input$condition_column_1]]) > as.numeric(input$condition_value_1),
+                        "<" = as.numeric(data[[input$condition_column_1]]) < as.numeric(input$condition_value_1),
+                        ">=" = as.numeric(data[[input$condition_column_1]]) >= as.numeric(input$condition_value_1),
+                        "<=" = as.numeric(data[[input$condition_column_1]]) <= as.numeric(input$condition_value_1),
+                        "contains" = grepl(input$condition_value_1, data[[input$condition_column_1]], fixed = TRUE),
+                        "startswith" = startsWith(as.character(data[[input$condition_column_1]]), input$condition_value_1),
+                        "endswith" = endsWith(as.character(data[[input$condition_column_1]]), input$condition_value_1))
+      
+      final_result <- result1
+      
+      # If second condition is active, evaluate it and combine with first condition
+      if (input$condition_logic != "None") {
+        req(input$condition_column_2, input$condition_operator_2, input$condition_value_2)
+        
+        result2 <- switch(input$condition_operator_2,
+                          "==" = data[[input$condition_column_2]] == input$condition_value_2,
+                          "!=" = data[[input$condition_column_2]] != input$condition_value_2,
+                          ">" = as.numeric(data[[input$condition_column_2]]) > as.numeric(input$condition_value_2),
+                          "<" = as.numeric(data[[input$condition_column_2]]) < as.numeric(input$condition_value_2),
+                          ">=" = as.numeric(data[[input$condition_column_2]]) >= as.numeric(input$condition_value_2),
+                          "<=" = as.numeric(data[[input$condition_column_2]]) <= as.numeric(input$condition_value_2),
+                          "contains" = grepl(input$condition_value_2, data[[input$condition_column_2]], fixed = TRUE),
+                          "startswith" = startsWith(as.character(data[[input$condition_column_2]]), input$condition_value_2),
+                          "endswith" = EndsWith(as.character(data[[input$condition_column_2]]), input$condition_value_2))
+        
+        # Combine conditions based on logic
+        final_result <- if (input$condition_logic == "AND") {
+          result1 & result2
+        } else {  # OR
+          result1 | result2
+        }
+      }
+      
+      # Add the new column with conditional values
+      data[, (input$new_column_name) := ifelse(final_result, input$true_value, input$false_value)]
+      
+      # Update datasets with the modified data
+      current_data <- datasets()
+      current_data[[input$conditional_table]] <- data
+      datasets(current_data)
+      
+      # Show success message
       showNotification("Conditional column added successfully.", type = "message")
       
     }, error = function(e) {
