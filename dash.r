@@ -1283,7 +1283,7 @@ server <- function(input, output, session) {
         plot_ly() %>%
           add_lines(x = ~forecast$ds, y = ~forecast$yhat, name = 'Forecast') %>%
           add_ribbons(x = ~forecast$ds, ymin = ~forecast$yhat_lower, ymax = ~forecast$yhat_upper, name = 'Uncertainty', fillcolor = 'rgba(7, 164, 181, 0.2)', line = list(color = 'transparent')) %>%
-          layout(title = 'Forecast', xaxis = list(title = 'Date'), yaxis = list(title = 'Value'))
+          layout(title = 'Forecast', xaxis = list(title = 'Date'), yaxis = list(title = 'Value'), hoverformat = '.2f')
       })
       
       # Show forecast table
@@ -1376,7 +1376,7 @@ server <- function(input, output, session) {
                         "<=" = as.numeric(data[[input$condition_column_1]]) <= as.numeric(input$condition_value_1),
                         "contains" = grepl(input$condition_value_1, data[[input$condition_column_1]], fixed = TRUE),
                         "startswith" = startsWith(as.character(data[[input$condition_column_1]]), input$condition_value_1),
-                        "endswith" = endsWith(as.character(data[[input$condition_column_1]]), input$condition_value_1))
+                        "endswith" = EndsWith(as.character(data[[input$condition_column_1]]), input$condition_value_1))
       
       final_result <- result1
       
