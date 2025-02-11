@@ -1281,14 +1281,14 @@ server <- function(input, output, session) {
       # Plot forecast using plotly
       output$forecast_plot <- renderPlotly({
         plot_ly() %>%
-          add_lines(x = ~forecast$ds, y = ~forecast$yhat, name = 'Forecast') %>%
-          add_ribbons(x = ~forecast$ds, ymin = ~forecast$yhat_lower, ymax = ~forecast$yhat_upper, name = 'Uncertainty', fillcolor = 'rgba(7, 164, 181, 0.2)', line = list(color = 'transparent')) %>%
-          layout(title = 'Forecast', xaxis = list(title = 'Date'), yaxis = list(title = 'Value'), yaxis = list(tickformat = ".2f"))
+          add_lines(x = ~forecast_data$ds, y = ~forecast_data$yhat, name = 'Forecast') %>%
+          add_ribbons(x = ~forecast_data$ds, ymin = ~forecast_data$yhat_lower, ymax = ~forecast_data$yhat_upper, name = 'Uncertainty', fillcolor = 'rgba(7, 164, 181, 0.2)', line = list(color = 'transparent')) %>%
+          layout(title = 'Forecast', xaxis = list(title = 'Date'), yaxis = list(title = 'Value', tickformat = ".2f"))
       })
       
       # Show forecast table
       output$forecast_table <- renderDT({
-        datatable(forecast_data, options = list(pageLength = 10, scrollX = TRUE, columnDefs = list(list(targets = 1:3, render = JS("function(data, type, row, meta) { return type === 'display' && data != null ? data.toFixed(2) : data; }")))))
+        datatable(forecast_data, options = list(pageLength = 10, scrollX = TRUE))
       })
       
       showNotification("Forecast completed successfully.", type = "message")
