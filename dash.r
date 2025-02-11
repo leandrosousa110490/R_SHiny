@@ -1272,7 +1272,7 @@ server <- function(input, output, session) {
       forecast <- predict(m, future)
       
       # Update datasets with forecast
-      forecast_data <- data.table(ds = forecast$ds, yhat = forecast$yhat, yhat_lower = forecast$yhat_lower, yhat_upper = forecast$yhat_upper)
+      forecast_data <- data.table(ds = forecast$ds, yhat = round(forecast$yhat, 2), yhat_lower = round(forecast$yhat_lower, 2), yhat_upper = round(forecast$yhat_upper, 2))
       current_data <- datasets()
       current_data[["forecast_results"]] <- forecast_data
       datasets(current_data)
@@ -1283,12 +1283,12 @@ server <- function(input, output, session) {
         plot_ly() %>%
           add_lines(x = ~forecast$ds, y = ~forecast$yhat, name = 'Forecast') %>%
           add_ribbons(x = ~forecast$ds, ymin = ~forecast$yhat_lower, ymax = ~forecast$yhat_upper, name = 'Uncertainty', fillcolor = 'rgba(7, 164, 181, 0.2)', line = list(color = 'transparent')) %>%
-          layout(title = 'Forecast', xaxis = list(title = 'Date'), yaxis = list(title = 'Value'), hoverformat = '.2f')
+          layout(title = 'Forecast', xaxis = list(title = 'Date'), yaxis = list(title = 'Value'), yaxis = list(tickformat = ".2f"))
       })
       
       # Show forecast table
       output$forecast_table <- renderDT({
-        datatable(forecast_data, options = list(pageLength = 10, scrollX = TRUE))
+        datatable(forecast_data, options = list(pageLength = 10, scrollX = TRUE, columnDefs = list(list(targets = 1:3, render = JS("function(data, type, row, meta) { return type === 'display' && data != null ? data.toFixed(2) : data; }")))))
       })
       
       showNotification("Forecast completed successfully.", type = "message")
