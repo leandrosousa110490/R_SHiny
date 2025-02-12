@@ -457,8 +457,12 @@ ui <- dashboardPage(
                     title = "Forecast Results",
                     status = "info",
                     solidHeader = TRUE,
-                    plotlyOutput("forecast_plot"),  # Use plotlyOutput instead of plotOutput
-                    DTOutput("forecast_table")
+                    div(style = "position: relative;",
+                        plotlyOutput("forecast_plot")
+                    ),
+                    div(style = "margin-top: 20px;",
+                        DTOutput("forecast_table")
+                    )
                 )
               )
       )
@@ -1288,7 +1292,47 @@ server <- function(input, output, session) {
       
       # Show forecast table
       output$forecast_table <- renderDT({
-        datatable(forecast_data, options = list(pageLength = 10, scrollX = TRUE))
+        datatable(forecast_data, 
+                  options = list(
+                    pageLength = 10, 
+                    scrollX = TRUE,
+                    dom = 'Bfrtip',
+                    buttons = list(
+                      'copy',
+                      list(
+                        extend = 'collection',
+                        buttons = list(
+                          list(
+                            extend = 'csv',
+                            filename = paste0("forecast_results_", format(Sys.Date(), "%Y%m%d"))
+                          ),
+                          list(
+                            extend = 'excel',
+                            filename = paste0("forecast_results_", format(Sys.Date(), "%Y%m%d"))
+                          ),
+                          list(
+                            extend = 'pdf',
+                            filename = paste0("forecast_results_", format(Sys.Date(), "%Y%m%d"))
+                          )
+                        ),
+                        text = 'Download'
+                      ),
+                      'print',
+                      list(
+                        extend = 'collection',
+                        text = 'View',
+                        action = JS("function ( e, dt, node, config ) {
+                         Shiny.setInputValue('fullscreen_plot', true);
+                       }")
+                      )
+                    )
+                  ),
+                  extensions = c('Buttons'),
+                  callback = JS("
+                   table.buttons().container().css('margin-bottom', '10px');
+                   table.buttons().container().css('margin-right', '10px');
+                 ")
+        )
       })
       
       showNotification("Forecast completed successfully.", type = "message")
@@ -1296,6 +1340,32 @@ server <- function(input, output, session) {
     }, error = function(e) {
       showNotification(paste("Error running forecast:", e$message), type = "error")
     })
+  })
+  
+  # Handle full-screen plot
+  observeEvent(input$fullscreen_plot, {
+    showModal(modalDialog(
+      title = "Forecast Plot",
+      size = "l",
+      easyClose = TRUE,
+      plotlyOutput("fullscreen_forecast_plot", height = "600px")
+    ))
+  })
+  
+  # Render full-screen plot
+  output$fullscreen_forecast_plot <- renderPlotly({
+    req(datasets()[["forecast_results"]])
+    forecast_data <- datasets()[["forecast_results"]]
+    
+    plot_ly() %>%
+      add_lines(x = ~forecast_data$ds, y = ~forecast_data$yhat, name = 'Forecast') %>%
+      add_ribbons(x = ~forecast_data$ds, ymin = ~forecast_data$yhat_lower, ymax = ~forecast_data$yhat_upper, 
+                  name = 'Uncertainty', fillcolor = 'rgba(7, 164, 181, 0.2)', line = list(color = 'transparent')) %>%
+      layout(title = 'Forecast',
+             xaxis = list(title = 'Date'),
+             yaxis = list(title = 'Value', tickformat = ".2f"),
+             showlegend = TRUE,
+             margin = list(l = 50, r = 50, b = 50, t = 50, pad = 4))
   })
   
   # Update condition column choices when table is selected
