@@ -21,6 +21,8 @@ library(arrow)
 library(dtplyr)
 library(prophet)  # Add prophet library
 library(plotly)   # Add plotly library
+library(rpivotTable) # Add rpivotTable library
+library(shinyjs)  # Add shinyjs library for runjs function
 
 # Configure parallel processing
 future::plan(multicore)
@@ -182,10 +184,12 @@ ui <- dashboardPage(
       menuItem("Data Management", tabName = "data", icon = icon("table")),
       menuItem("Data Manipulation", tabName = "manipulation", icon = icon("tools")),
       menuItem("Visualization", tabName = "viz", icon = icon("chart-bar")),
+      menuItem("Pivot Table", tabName = "pivot", icon = icon("table")), # Add Pivot Table menu item
       menuItem("Forecasting", tabName = "forecasting", icon = icon("chart-line"))  # Add Forecasting menu item
     )
   ),
   dashboardBody(
+    shinyjs::useShinyjs(),  # Enable shinyjs functionality
     tabItems(
       # Add this new Database Tab
       tabItem(tabName = "db",
@@ -439,6 +443,32 @@ ui <- dashboardPage(
                 )
               )
       ),
+      tabItem(tabName = "pivot",
+              fluidRow(
+                box(width = 12,
+                    title = "Pivot Table Analysis",
+                    status = "primary",
+                    solidHeader = TRUE,
+                    selectInput("pivot_table", "Select Table for Pivot Analysis", 
+                                choices = NULL),
+                    actionButton("create_pivot", "Create Pivot Table", 
+                                 class = "btn-primary")
+                )
+              ),
+              fluidRow(
+                box(width = 12,
+                    title = "Interactive Pivot Table",
+                    status = "info",
+                    solidHeader = TRUE,
+                    height = "auto",
+                    style = "overflow: visible; min-height: 600px;",
+                    div(
+                      style = "overflow: visible; width: 100%;",
+                      rpivotTableOutput("pivot_output", height = "auto")
+                    )
+                )
+              )
+      ),
       tabItem(tabName = "forecasting",
               fluidRow(
                 box(width = 12,
@@ -599,7 +629,8 @@ server <- function(input, output, session) {
     updateSelectInput(session, "keep_duplicates_table", choices = choices)
     updateSelectInput(session, "replace_value_table", choices = choices)
     updateSelectInput(session, "forecast_table", choices = choices)
-    updateSelectInput(session, "conditional_table", choices = choices)  # Add this line
+    updateSelectInput(session, "conditional_table", choices = choices)
+    updateSelectInput(session, "pivot_table", choices = choices) # Add pivot table selection
   }
   
   # Update merge columns when tables are selected
@@ -1488,6 +1519,42 @@ server <- function(input, output, session) {
       showNotification(paste("Error adding conditional column:", e$message), 
                        type = "error")
     })
+  })
+  
+  # Add Pivot Table functionality
+  observeEvent(input$create_pivot, {
+    req(input$pivot_table)
+    data <- datasets()[[input$pivot_table]]
+    
+    # Sample data for pivot table if too large
+    if(nrow(data) > 20000) {
+      data <- sample_large_dataset(data, n = 20000)
+      showNotification(
+        "Dataset sampled to 20,000 rows for pivot table analysis", 
+        type = "warning"
+      )
+    }
+    
+    # Render the pivot table
+    output$pivot_output <- renderRpivotTable({
+      rpivotTable(data,
+                  rows = names(data)[1], 
+                  cols = if(length(names(data)) > 1) names(data)[2] else NULL,
+                  aggregatorName = "Count",
+                  rendererName = "Table",
+                  width = "100%",
+                  height = "auto",
+                  onRefresh = htmlwidgets::JS("function(config) { setTimeout(function() { window.dispatchEvent(new Event('resize')); }, 500); }"))
+    })
+    
+    # Force resize of the container after pivot table is rendered
+    runjs("
+      $(document).ready(function() {
+        setTimeout(function() {
+          window.dispatchEvent(new Event('resize'));
+        }, 1000);
+      });
+    ")
   })
 }
 
